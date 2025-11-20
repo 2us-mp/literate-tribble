@@ -1,7 +1,7 @@
 {
-  "name": "charmerspay",
+  "name": "charmers-pay-backend",
   "version": "1.0.0",
-  "description": "Charmers Pay backend API for Stripe payment processing.",
+  "description": "Charmers Pay backend for Stripe PaymentIntent creation",
   "main": "server.js",
   "type": "module",
   "scripts": {
@@ -10,9 +10,6 @@
   "dependencies": {
     "cors": "^2.8.5",
     "express": "^4.19.2",
-    "stripe": "^16.6.0"
-  },
-  "engines": {
-    "node": ">=18.0.0"
+    "stripe": "^16.11.0"
   }
 }
