@@ -6,39 +6,34 @@ import cors from "cors";
 const app = express();
 const port = process.env.PORT || 3000;
 
-// initialize Stripe with your secret key from Render environment
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY, {
   apiVersion: "2024-06-20",
 });
 
-// --- CORS setup: only allow pay.charmersbiz.org ---
+// allow your domain + Safari iOS
 const allowedOrigin = "https://pay.charmersbiz.org";
+
 app.use(
   cors({
     origin: function (origin, callback) {
-      // Allow no-origin requests only for internal or health checks
-      if (!origin) return callback(null, true);
+      if (!origin) return callback(null, true); // iOS Safari fix
       if (origin === allowedOrigin) return callback(null, true);
-      // reject anything else
-      return callback(new Error("Not allowed by CORS policy"), false);
+      return callback(new Error("CORS blocked"), false);
     },
   })
 );
 
-// Parse JSON bodies
 app.use(express.json());
 
-// health check
 app.get("/", (req, res) => {
-  res.send("CharmersPay API active and restricted to pay.charmersbiz.org");
+  res.send("CharmersPay API active");
 });
 
-// --- main endpoint ---
 app.post("/create-payment-intent", async (req, res) => {
   try {
-    // extra safeguard: verify Host header
-    const referer = req.get("origin") || "";
-    if (referer !== allowedOrigin) {
+    // Safari fix: only block wrong origins, not null origins
+    const origin = req.get("origin");
+    if (origin && origin !== allowedOrigin) {
       return res.status(403).json({ error: "Forbidden: invalid origin" });
     }
 
@@ -58,7 +53,6 @@ app.post("/create-payment-intent", async (req, res) => {
   }
 });
 
-// --- Start server ---
-app.listen(port, () => {
-  console.log(`CharmersPay API running on port ${port}`);
-});
+app.listen(port, () =>
+  console.log(`CharmersPay API running on port ${port}`)
+);
