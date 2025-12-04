@@ -1,18 +1,31 @@
 {
-  "name": "charmers-pay-backend",
+  "name": "charmers-payment-backend",
   "version": "1.0.0",
-  "description": "Charmers Pay backend for Stripe",
-  "type": "module",
+  "description": "Charmers Payments | Stripe PaymentIntent backend + order logging",
   "main": "server.js",
   "scripts": {
-    "start": "node server.js"
+    "start": "node server.js",
+    "dev": "nodemon server.js"
   },
   "dependencies": {
     "cors": "^2.8.5",
-    "express": "^4.19.2",
-    "stripe": "^16.11.0"
+    "dotenv": "^16.4.7",
+    "express": "^4.18.2",
+    "stripe": "^14.0.0"
+  },
+  "devDependencies": {
+    "nodemon": "^3.1.0"
   },
   "engines": {
-    "node": "18.x"
-  }
+    "node": ">=18.0.0"
+  },
+  "keywords": [
+    "stripe",
+    "payments",
+    "express",
+    "backend",
+    "charmers"
+  ],
+  "author": "Jameson Jones",
+  "license": "MIT"
 }
