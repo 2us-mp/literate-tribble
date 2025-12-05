@@ -8,67 +8,52 @@ const app = express();
 // Middleware
 app.use(cors());
 app.use(express.json());
-app.use(express.static('public')); // Serve HTML dashboard
+app.use(express.static('public'));
 
 // Initialize Stripe
 const stripe = Stripe(process.env.STRIPE_SECRET_KEY);
 
-// In-memory storage (replace with database in production)
+// In-memory storage
 let orders = [];
 
-// Create PaymentIntent AND save order
+// Create PaymentIntent
 app.post('/create-payment-intent', async (req, res) => {
     try {
-        const { 
-            amount, 
-            currency = 'usd', 
-            orderDetails, // New: Order details from frontend
-            customerInfo 
-        } = req.body;
+        const { amount, currency = 'usd', orderDetails, customerInfo, shipping } = req.body;
 
-        // Validate
         if (!amount || amount < 50) {
             return res.status(400).json({ 
                 error: 'Invalid amount. Minimum charge is $0.50' 
             });
         }
 
-        if (!orderDetails) {
-            return res.status(400).json({ 
-                error: 'Order details required' 
-            });
-        }
-
-        // Create PaymentIntent
         const paymentIntent = await stripe.paymentIntents.create({
             amount: amount,
             currency: currency,
             automatic_payment_methods: { enabled: true },
             metadata: {
-                orderType: orderDetails.braceletType,
+                orderType: orderDetails?.braceletType || 'unknown',
                 customerName: customerInfo?.name || 'Unknown',
-                email: customerInfo?.email || 'Unknown',
-                timestamp: new Date().toISOString()
+                email: customerInfo?.email || 'Unknown'
             }
         });
 
-        // Save order details (will be completed after webhook)
+        // Save order
         const order = {
             id: paymentIntent.id,
-            amount: amount / 100, // Convert cents to dollars
+            amount: amount / 100,
             status: 'pending',
             paymentIntentId: paymentIntent.id,
             customerInfo: customerInfo || {},
-            orderDetails: orderDetails,
-            shipping: orderDetails.shipping || {},
-            createdAt: new Date().toISOString(),
-            completedAt: null
+            orderDetails: orderDetails || {},
+            shipping: shipping || {},
+            createdAt: new Date().toISOString()
         };
 
         orders.push(order);
 
         res.json({
-            clientSecret: paymentIntent.client_secret,
+            clientSecret: paymentIntent.clientSecret,
             paymentIntentId: paymentIntent.id,
             orderId: order.id
         });
@@ -79,72 +64,19 @@ app.post('/create-payment-intent', async (req, res) => {
     }
 });
 
-// Webhook to update order status
-app.post('/webhook', express.raw({ type: 'application/json' }), async (req, res) => {
-    const sig = req.headers['stripe-signature'];
-    let event;
-
-    try {
-        event = stripe.webhooks.constructEvent(
-            req.body,
-            sig,
-            process.env.STRIPE_WEBHOOK_SECRET
-        );
-    } catch (err) {
-        return res.status(400).send(`Webhook Error: ${err.message}`);
-    }
-
-    switch (event.type) {
-        case 'payment_intent.succeeded':
-            const paymentIntent = event.data.object;
-            
-            // Update order status
-            const orderIndex = orders.findIndex(o => o.paymentIntentId === paymentIntent.id);
-            if (orderIndex !== -1) {
-                orders[orderIndex].status = 'completed';
-                orders[orderIndex].completedAt = new Date().toISOString();
-                orders[orderIndex].stripePaymentId = paymentIntent.id;
-                
-                console.log(`✅ Order completed: ${paymentIntent.id}`);
-                console.log(`Customer: ${orders[orderIndex].customerInfo.name}`);
-                console.log(`Amount: $${orders[orderIndex].amount}`);
-            }
-            break;
-
-        case 'payment_intent.payment_failed':
-            const failedPayment = event.data.object;
-            const failedOrderIndex = orders.findIndex(o => o.paymentIntentId === failedPayment.id);
-            if (failedOrderIndex !== -1) {
-                orders[failedOrderIndex].status = 'failed';
-                console.log(`❌ Payment failed: ${failedPayment.id}`);
-            }
-            break;
-    }
-
-    res.json({ received: true });
-});
-
-// Save order directly (fallback if webhook fails)
+// Save order
 app.post('/save-order', async (req, res) => {
     try {
-        const { 
-            paymentIntentId, 
-            status = 'completed',
-            customerInfo,
-            orderDetails,
-            shipping 
-        } = req.body;
+        const { paymentIntentId, status = 'completed', customerInfo, orderDetails, shipping, amount } = req.body;
 
-        // Check if order already exists
         let orderIndex = orders.findIndex(o => o.paymentIntentId === paymentIntentId);
         
         if (orderIndex === -1) {
-            // Create new order
             const order = {
                 id: `order_${Date.now()}`,
                 paymentIntentId: paymentIntentId,
                 status: status,
-                amount: orderDetails?.total || 0,
+                amount: amount || 0,
                 customerInfo: customerInfo || {},
                 orderDetails: orderDetails || {},
                 shipping: shipping || {},
@@ -155,16 +87,17 @@ app.post('/save-order', async (req, res) => {
             orders.push(order);
             orderIndex = orders.length - 1;
         } else {
-            // Update existing order
             orders[orderIndex].status = status;
             orders[orderIndex].completedAt = status === 'completed' ? new Date().toISOString() : null;
             
             if (customerInfo) orders[orderIndex].customerInfo = customerInfo;
             if (orderDetails) orders[orderIndex].orderDetails = orderDetails;
             if (shipping) orders[orderIndex].shipping = shipping;
+            if (amount) orders[orderIndex].amount = amount;
         }
 
         console.log(`📦 Order saved: ${orders[orderIndex].id}`);
+        
         res.json({ 
             success: true, 
             orderId: orders[orderIndex].id,
@@ -177,13 +110,10 @@ app.post('/save-order', async (req, res) => {
     }
 });
 
-// Get all orders (for dashboard)
+// Get all orders
 app.get('/api/orders', (req, res) => {
     try {
-        // Filter only completed orders
         const completedOrders = orders.filter(order => order.status === 'completed');
-        
-        // Sort by most recent
         completedOrders.sort((a, b) => new Date(b.completedAt || b.createdAt) - new Date(a.completedAt || a.createdAt));
         
         res.json({
@@ -191,21 +121,6 @@ app.get('/api/orders', (req, res) => {
             count: completedOrders.length,
             orders: completedOrders
         });
-    } catch (error) {
-        res.status(500).json({ error: error.message });
-    }
-});
-
-// Get single order
-app.get('/api/orders/:id', (req, res) => {
-    try {
-        const order = orders.find(o => o.id === req.params.id || o.paymentIntentId === req.params.id);
-        
-        if (!order) {
-            return res.status(404).json({ error: 'Order not found' });
-        }
-        
-        res.json({ success: true, order });
     } catch (error) {
         res.status(500).json({ error: error.message });
     }
@@ -226,10 +141,32 @@ app.get('/dashboard', (req, res) => {
     res.sendFile(__dirname + '/public/dashboard.html');
 });
 
+// Root endpoint
+app.get('/', (req, res) => {
+    res.json({
+        message: 'Charmers Backend API',
+        endpoints: {
+            health: '/health',
+            createPaymentIntent: '/create-payment-intent',
+            saveOrder: '/save-order',
+            orders: '/api/orders',
+            dashboard: '/dashboard'
+        }
+    });
+});
+
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-    console.log(`🚀 Charmers backend running on port ${PORT}`);
-    console.log(`📊 Dashboard: http://localhost:${PORT}/dashboard`);
-    console.log(`💳 Payment endpoint: http://localhost:${PORT}/create-payment-intent`);
-    console.log(`📦 Orders endpoint: http://localhost:${PORT}/api/orders`);
+    const isProduction = process.env.NODE_ENV === 'production';
+    const baseUrl = isProduction ? 
+        `https://pay-charmersv2.onrender.com` : 
+        `http://localhost:${PORT}`;
+    
+    console.log(`🚀 Charmers backend running`);
+    console.log(`🌐 Base URL: ${baseUrl}`);
+    console.log(`📊 Dashboard: ${baseUrl}/dashboard`);
+    console.log(`💳 Create PaymentIntent: ${baseUrl}/create-payment-intent`);
+    console.log(`📦 Save Order: ${baseUrl}/save-order`);
+    console.log(`📋 Health check: ${baseUrl}/health`);
+    console.log(`🔧 Environment: ${isProduction ? 'PRODUCTION' : 'DEVELOPMENT'}`);
 });
