@@ -1,29 +1,104 @@
-const express = require('express');
-const cors = require('cors');
-const Stripe = require('stripe');
-require('dotenv').config();
+const express = require("express");
+const fs = require("fs");
+const path = require("path");
+const session = require("express-session");
+const cors = require("cors");
+const Stripe = require("stripe");
+require("dotenv").config();
 
 const app = express();
 
 // Middleware
 app.use(cors());
 app.use(express.json());
-app.use(express.static('public'));
+app.use(express.urlencoded({ extended: true }));
 
-// Initialize Stripe
+// Static files (if needed)
+app.use(express.static("public"));
+
+// Stripe
 const stripe = Stripe(process.env.STRIPE_SECRET_KEY);
 
-// In-memory storage
-let orders = [];
+// ===============================
+// Disk Storage (Completed Orders Only)
+// ===============================
+const ORDERS_FILE = path.join(__dirname, "orders.json");
 
-// Create PaymentIntent
-app.post('/create-payment-intent', async (req, res) => {
+// Ensure file exists
+if (!fs.existsSync(ORDERS_FILE)) {
+    fs.writeFileSync(ORDERS_FILE, JSON.stringify([]));
+}
+
+function loadOrders() {
+    return JSON.parse(fs.readFileSync(ORDERS_FILE));
+}
+
+function saveOrders(orders) {
+    fs.writeFileSync(ORDERS_FILE, JSON.stringify(orders, null, 2));
+}
+
+// ===============================
+// Sessions (for login)
+// ===============================
+app.use(
+    session({
+        secret: process.env.SESSION_SECRET || "fallback-secret",
+        resave: false,
+        saveUninitialized: true,
+        cookie: { secure: false } // Render = false
+    })
+);
+
+// ===============================
+// Login Page (Plain Text)
+// ===============================
+app.get("/login", (req, res) => {
+    res.send(`
+Login Required
+------------------------
+
+<form method="POST" action="/login">
+Username:
+<input name="username" required>
+
+Password:
+<input type="password" name="password" required>
+
+<button type="submit">Login</button>
+</form>
+`);
+});
+
+app.post("/login", (req, res) => {
+    const { username, password } = req.body;
+
+    if (
+        username === process.env.ADMIN_USER &&
+        password === process.env.ADMIN_PASSWORD
+    ) {
+        req.session.isAdmin = true;
+        return res.redirect("/dashboard");
+    }
+
+    res.send("Invalid login.");
+});
+
+// Auth middleware
+function requireAdmin(req, res, next) {
+    if (!req.session.isAdmin) return res.redirect("/login");
+    next();
+}
+
+// ===============================
+// Stripe PaymentIntent (Your code preserved)
+// ===============================
+app.post("/create-payment-intent", async (req, res) => {
     try {
-        const { amount, currency = 'usd', orderDetails, customerInfo, shipping } = req.body;
+        const { amount, currency = "usd", orderDetails, customerInfo, shipping } = req.body;
 
         if (!amount || amount < 50) {
-            return res.status(400).json({ 
-                error: 'Invalid amount. Minimum charge is $0.50' 
+            return res.status(400).json({
+                error: "Invalid amount. Minimum charge is $0.50"
             });
         }
 
@@ -32,18 +107,41 @@ app.post('/create-payment-intent', async (req, res) => {
             currency: currency,
             automatic_payment_methods: { enabled: true },
             metadata: {
-                orderType: orderDetails?.braceletType || 'unknown',
-                customerName: customerInfo?.name || 'Unknown',
-                email: customerInfo?.email || 'Unknown'
+                orderType: orderDetails?.braceletType || "unknown",
+                customerName: customerInfo?.name || "Unknown",
+                email: customerInfo?.email || "Unknown"
             }
         });
 
-        // Save order
+        res.json({
+            clientSecret: paymentIntent.client_secret,
+            paymentIntentId: paymentIntent.id
+        });
+
+    } catch (error) {
+        console.error("Error creating PaymentIntent:", error);
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// ===============================
+// Save Completed Order (Only final step)
+// ===============================
+app.post("/save-order", async (req, res) => {
+    try {
+        const { paymentIntentId, status = "completed", customerInfo, orderDetails, shipping, amount } = req.body;
+
+        if (!paymentIntentId) {
+            return res.status(400).json({ error: "Missing paymentIntentId" });
+        }
+
+        const orders = loadOrders();
+
         const order = {
-            id: paymentIntent.id,
-            amount: amount / 100,
-            status: 'pending',
-            paymentIntentId: paymentIntent.id,
+            id: `order_${Date.now()}`,
+            paymentIntentId,
+            status,
+            amount,
             customerInfo: customerInfo || {},
             orderDetails: orderDetails || {},
             shipping: shipping || {},
@@ -51,122 +149,87 @@ app.post('/create-payment-intent', async (req, res) => {
         };
 
         orders.push(order);
+        saveOrders(orders);
 
         res.json({
-            clientSecret: paymentIntent.clientSecret,
-            paymentIntentId: paymentIntent.id,
+            success: true,
             orderId: order.id
         });
 
     } catch (error) {
-        console.error('Error creating PaymentIntent:', error);
+        console.error("Error saving order:", error);
         res.status(500).json({ error: error.message });
     }
 });
 
-// Save order
-app.post('/save-order', async (req, res) => {
-    try {
-        const { paymentIntentId, status = 'completed', customerInfo, orderDetails, shipping, amount } = req.body;
+// ===============================
+// Dashboard (Plain Text)
+// ===============================
+app.get("/dashboard", requireAdmin, (req, res) => {
+    const orders = loadOrders();
 
-        let orderIndex = orders.findIndex(o => o.paymentIntentId === paymentIntentId);
-        
-        if (orderIndex === -1) {
-            const order = {
-                id: `order_${Date.now()}`,
-                paymentIntentId: paymentIntentId,
-                status: status,
-                amount: amount || 0,
-                customerInfo: customerInfo || {},
-                orderDetails: orderDetails || {},
-                shipping: shipping || {},
-                createdAt: new Date().toISOString(),
-                completedAt: status === 'completed' ? new Date().toISOString() : null
-            };
-            
-            orders.push(order);
-            orderIndex = orders.length - 1;
-        } else {
-            orders[orderIndex].status = status;
-            orders[orderIndex].completedAt = status === 'completed' ? new Date().toISOString() : null;
-            
-            if (customerInfo) orders[orderIndex].customerInfo = customerInfo;
-            if (orderDetails) orders[orderIndex].orderDetails = orderDetails;
-            if (shipping) orders[orderIndex].shipping = shipping;
-            if (amount) orders[orderIndex].amount = amount;
-        }
+    let html = `
+Charmers Order Dashboard
+--------------------------
 
-        console.log(`📦 Order saved: ${orders[orderIndex].id}`);
-        
-        res.json({ 
-            success: true, 
-            orderId: orders[orderIndex].id,
-            message: 'Order saved successfully'
-        });
+Total Completed Orders: ${orders.length}
 
-    } catch (error) {
-        console.error('Error saving order:', error);
-        res.status(500).json({ error: error.message });
-    }
-});
+<a href="/logout">Logout</a>
 
-// Get all orders
-app.get('/api/orders', (req, res) => {
-    try {
-        const completedOrders = orders.filter(order => order.status === 'completed');
-        completedOrders.sort((a, b) => new Date(b.completedAt || b.createdAt) - new Date(a.completedAt || a.createdAt));
-        
-        res.json({
-            success: true,
-            count: completedOrders.length,
-            orders: completedOrders
-        });
-    } catch (error) {
-        res.status(500).json({ error: error.message });
-    }
-});
+<br><br>
 
-// Health check
-app.get('/health', (req, res) => {
-    res.json({ 
-        status: 'ok', 
-        service: 'Charmers Payment API',
-        ordersCount: orders.length,
-        completedOrders: orders.filter(o => o.status === 'completed').length
+<table border="1" cellpadding="5">
+<tr>
+  <th>Order ID</th>
+  <th>Name</th>
+  <th>Email</th>
+  <th>Amount</th>
+  <th>Status</th>
+  <th>Timestamp</th>
+</tr>
+`;
+
+    orders.forEach(o => {
+        html += `
+<tr>
+  <td>${o.id}</td>
+  <td>${o.customerInfo?.name || "N/A"}</td>
+  <td>${o.customerInfo?.email || "N/A"}</td>
+  <td>$${o.amount}</td>
+  <td>${o.status}</td>
+  <td>${o.createdAt}</td>
+</tr>
+`;
     });
+
+    html += "</table>";
+
+    res.send(html);
 });
 
-// Serve dashboard
-app.get('/dashboard', (req, res) => {
-    res.sendFile(__dirname + '/public/dashboard.html');
+// Logout
+app.get("/logout", (req, res) => {
+    req.session.destroy(() => res.redirect("/login"));
 });
 
-// Root endpoint
-app.get('/', (req, res) => {
-    res.json({
-        message: 'Charmers Backend API',
-        endpoints: {
-            health: '/health',
-            createPaymentIntent: '/create-payment-intent',
-            saveOrder: '/save-order',
-            orders: '/api/orders',
-            dashboard: '/dashboard'
-        }
-    });
+// ===============================
+// Health
+// ===============================
+app.get("/health", (req, res) => {
+    res.json({ status: "ok", service: "Charmers Payment API" });
 });
 
+// ===============================
+// Root
+// ===============================
+app.get("/", (req, res) => {
+    res.send("Charmers Backend Running.");
+});
+
+// ===============================
+// Start
+// ===============================
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-    const isProduction = process.env.NODE_ENV === 'production';
-    const baseUrl = isProduction ? 
-        `https://pay-charmersv2.onrender.com` : 
-        `http://localhost:${PORT}`;
-    
-    console.log(`🚀 Charmers backend running`);
-    console.log(`🌐 Base URL: ${baseUrl}`);
-    console.log(`📊 Dashboard: ${baseUrl}/dashboard`);
-    console.log(`💳 Create PaymentIntent: ${baseUrl}/create-payment-intent`);
-    console.log(`📦 Save Order: ${baseUrl}/save-order`);
-    console.log(`📋 Health check: ${baseUrl}/health`);
-    console.log(`🔧 Environment: ${isProduction ? 'PRODUCTION' : 'DEVELOPMENT'}`);
+    console.log(`🚀 Charmers backend running on port ${PORT}`);
 });
